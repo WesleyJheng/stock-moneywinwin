@@ -1,0 +1,7 @@
+.env
+*.log
+cloudflared.log
+scheduler.log
+tunnel_url.txt
+__pycache__/
+*.pyc
