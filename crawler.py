@@ -50,9 +50,67 @@ def ad_to_roc_date(ad_date_str: str, delimiter: str = "/") -> str:
     return ""
 
 def fetch_twse_quotes() -> (str, List[Dict[str, Any]]):
-    """抓取 TWSE 上市全股票日收盤行情"""
+    """抓取 TWSE 上市全股票日收盤行情 (優先使用 RWD 即時 API 取得當日最新數據，次選 OpenAPI)"""
+    url_rwd = "https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX?response=json&type=ALLBUT0999"
+    logging.info("正在請求 TWSE 上市日收盤行情 (RWD API)...")
+    try:
+        resp = requests.get(url_rwd, headers=HEADERS, timeout=15)
+        if resp.status_code == 200:
+            data = resp.json()
+            raw_date = data.get("date", "")
+            if raw_date:
+                actual_date = f"{raw_date[:4]}-{raw_date[4:6]}-{raw_date[6:]}" if len(raw_date) == 8 else roc_to_ad_date(raw_date)
+                tables = data.get("tables", [])
+                target_rows = []
+                for t in tables:
+                    title = t.get("title", "") or ""
+                    if "每日收盤行情" in title or len(t.get("data", [])) > 500:
+                        target_rows = t.get("data", [])
+                        break
+                if target_rows:
+                    results = []
+                    for r in target_rows:
+                        if len(r) < 11:
+                            continue
+                        code = r[0].strip()
+                        if not (len(code) == 4 and code.isdigit()):
+                            continue
+                        close_p = clean_float(r[8])
+                        if close_p is None:
+                            continue
+                        open_p = clean_float(r[5]) or close_p
+                        high_p = clean_float(r[6]) or close_p
+                        low_p = clean_float(r[7]) or close_p
+                        chg_val = clean_float(r[10]) or 0.0
+                        dir_str = str(r[9])
+                        change = -abs(chg_val) if ("-" in dir_str or "green" in dir_str) else abs(chg_val)
+                        vol_shares = clean_float(r[2]) or 0.0
+                        volume_lots = round(vol_shares / 1000.0, 2)
+                        amount = clean_float(r[4]) or 0.0
+                        prev_close = close_p - change if close_p else 0
+                        change_pct = round((change / prev_close * 100), 2) if prev_close else 0.0
+                        results.append({
+                            "symbol": code,
+                            "name": r[1].strip(),
+                            "market": "上市",
+                            "date": actual_date,
+                            "open": open_p,
+                            "high": high_p,
+                            "low": low_p,
+                            "close": close_p,
+                            "change": change,
+                            "change_pct": change_pct,
+                            "volume": volume_lots,
+                            "amount": amount
+                        })
+                    if results:
+                        logging.info(f"TWSE 上市行情抓取成功 (RWD): {len(results)} 檔 (日期: {actual_date})")
+                        return actual_date, results
+    except Exception as e:
+        logging.warning(f"RWD TWSE 抓取失敗 ({e})，切換至 OpenAPI 備用...")
+
     url = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
-    logging.info("正在請求 TWSE 上市日收盤行情...")
+    logging.info("正在請求 TWSE 上市日收盤行情 (OpenAPI)...")
     try:
         resp = requests.get(url, headers=HEADERS, timeout=15)
         if resp.status_code == 200:
@@ -94,7 +152,7 @@ def fetch_twse_quotes() -> (str, List[Dict[str, Any]]):
                     "volume": volume_lots,
                     "amount": amount
                 })
-            logging.info(f"TWSE 上市行情抓取完成: {len(results)} 檔 (日期: {actual_date})")
+            logging.info(f"TWSE 上市行情抓取完成 (OpenAPI): {len(results)} 檔 (日期: {actual_date})")
             return actual_date, results
     except Exception as e:
         logging.error(f"抓取 TWSE 上市行情失敗: {e}")
