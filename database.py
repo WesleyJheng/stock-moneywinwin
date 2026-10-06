@@ -145,6 +145,99 @@ def init_db():
     conn.commit()
     conn.close()
 
+    # 從獨立 watchlists.json 載入最新自選股清單（確保雲端重啟或排程更新時不會覆蓋用戶修改）
+    load_watchlists_from_json()
+
+import json
+import base64
+import requests
+from config import BASE_DIR
+
+WATCHLISTS_JSON_PATH = BASE_DIR / "watchlists.json"
+
+def sync_watchlists_to_github():
+    """若設定了 GITHUB_TOKEN，將 watchlists.json 即時同步至 GitHub 倉庫"""
+    try:
+        from config import get_secret
+        token = get_secret("GITHUB_TOKEN", "")
+        repo = get_secret("GITHUB_REPO", "WesleyJheng/stock-moneywinwin")
+        if not token or not repo:
+            return
+
+        if not WATCHLISTS_JSON_PATH.exists():
+            return
+
+        with open(WATCHLISTS_JSON_PATH, "r", encoding="utf-8") as f:
+            content_str = f.read()
+
+        b64_content = base64.b64encode(content_str.encode("utf-8")).decode("utf-8")
+
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github.v3+json"
+        }
+        url = f"https://api.github.com/repos/{repo}/contents/watchlists.json"
+
+        resp = requests.get(url, headers=headers, timeout=5)
+        sha = None
+        if resp.status_code == 200:
+            sha = resp.json().get("sha")
+
+        payload = {
+            "message": "Sync watchlists.json from Streamlit Cloud [skip ci]",
+            "content": b64_content,
+            "branch": "main"
+        }
+        if sha:
+            payload["sha"] = sha
+
+        requests.put(url, headers=headers, json=payload, timeout=10)
+    except Exception:
+        pass
+
+def load_watchlists_from_json():
+    """從 watchlists.json 載入最新自選股並同步至 SQLite user_watchlist 表"""
+    if not WATCHLISTS_JSON_PATH.exists():
+        return
+    try:
+        with open(WATCHLISTS_JSON_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM user_watchlist")
+        for user_id, symbols in data.items():
+            for sym in symbols:
+                cursor.execute("INSERT OR IGNORE INTO user_watchlist (user_id, symbol) VALUES (?, ?)", (user_id, sym))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+def save_watchlists_to_json():
+    """把目前 SQLite 裡的 user_watchlist 轉存至 watchlists.json 並推送到 GitHub"""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT user_id, symbol FROM user_watchlist ORDER BY added_at ASC")
+        rows = cursor.fetchall()
+        conn.close()
+
+        data = {}
+        for r in rows:
+            uid, sym = r["user_id"], r["symbol"]
+            if uid not in data:
+                data[uid] = []
+            if sym not in data[uid]:
+                data[uid].append(sym)
+
+        with open(WATCHLISTS_JSON_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
+        sync_watchlists_to_github()
+    except Exception:
+        pass
+
 def get_watchlist(user_id: str = "WEI") -> List[Dict[str, Any]]:
     """讀取指定用戶 (WEI 或 YUN) 的自選股清單"""
     conn = get_connection()
@@ -180,6 +273,7 @@ def add_to_watchlist(symbol: str, name: Optional[str] = None, user_id: str = "WE
         """, (symbol, name))
     conn.commit()
     conn.close()
+    save_watchlists_to_json()
 
 def remove_from_watchlist(symbol: str, user_id: str = "WEI"):
     """自指定用戶 (WEI 或 YUN) 的自選股中移除股票"""
@@ -188,6 +282,7 @@ def remove_from_watchlist(symbol: str, user_id: str = "WEI"):
     cursor.execute("DELETE FROM user_watchlist WHERE user_id = ? AND symbol = ?", (user_id, symbol))
     conn.commit()
     conn.close()
+    save_watchlists_to_json()
 
 def get_latest_quote_date() -> Optional[str]:
     conn = get_connection()
